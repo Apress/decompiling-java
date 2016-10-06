@@ -1,0 +1,2518 @@
+package XMLToSource;
+
+import java_cup.runtime.*;
+import java.util.*;
+import java.lang.*;
+
+parser code {:
+	public static void main(String args[]) throws Exception {
+		new parser(new Yylex(System.in)).parse();
+	}
+:}
+
+action code {:
+
+	public class ExceptionTable {
+	   public int startPC;
+	   public int endPC;
+	   public int handlerPC;
+	   public int exceptionType;
+	   public int flags;
+	   /*
+	    * Flags: 
+	    * 1		startPC set		&01
+	    * 2		endPC set		&02
+	    * 4		handlerPC set		&04
+	    */
+	   
+	   public ExceptionTable(int SPC, int EPC, int HPC, int EXT)
+	   {
+	      this.startPC = SPC;
+	      this.endPC = EPC;
+	      this.handlerPC = HPC;
+	      this.exceptionType = EXT;
+	      this.flags = 0;
+	   }
+
+	}
+	
+	public class Switch {
+	   public ArrayList cases;
+	   public ArrayList branchpoints;
+	   public String caseType;
+	   public int branchpointIdx;
+	   public int defaultBranch;
+	   public int endBranch;
+	   public boolean defaultSet;
+	   public String origspace="";
+	   
+	   
+	   public void add(String caseentry, String branchentry)
+	   {
+   	      this.cases.add("" + Integer.parseInt(caseentry));
+   	      this.branchpoints.add("" + Integer.parseInt(branchentry));
+	   }
+	   
+	   public Switch()
+	   {
+	      this.cases=new ArrayList();
+	      this.branchpoints=new ArrayList();
+	      this.branchpointIdx=0;
+	      this.defaultBranch=0;
+	      this.endBranch=0;
+	      this.defaultSet=false;
+	   }
+	}
+
+        boolean forOrWhile, newArray=false, skipFinish = false, argsSubstitute=false;
+        BitSet varsInUse = new BitSet(0xFF); //FF variables possible
+        int level, lowest_num=9999, staticAdjustment=0, lastLine;
+        int arrayCounter, arrayElements;
+        Object temp;
+        String finalMethods="";
+        String type="", ClassName, MethodName, MethodParam, MethodProperties="";
+        String space="", outstandingType="", ClassInfo, returnType="void";
+        
+        ArrayList ConstantType=new ArrayList();
+        ArrayList ConstantVal=new ArrayList();
+        ArrayList FieldType=new ArrayList();
+        ArrayList FieldName=new ArrayList();
+        ArrayList ExceptionTables=new ArrayList();
+        ArrayList VarTypes=new ArrayList();
+        
+        int lineNum=0;
+        
+        Stack oStack = new Stack(); //analogous to the operand stack
+        Stack ifStack = new Stack(); //keeps track of where an if statement ends
+        Stack gotoStack = new Stack(); //keeps track of where goto statements branch to
+        Stack switchStack = new Stack(); //stores switches        
+        Stack importStack = new Stack(); //stores import data
+        Stack fieldStack = new Stack(); //stores field data
+        Stack finalStack = new Stack(); //stores final java code
+        
+        
+     public String resolveConstant (int constantPoolIndex)
+      { 
+        String constType, constVal, tempString="";
+        int temp1, temp2;
+         
+        constType = ConstantType.get(constantPoolIndex).toString();
+        constVal = ConstantVal.get(constantPoolIndex).toString();
+        
+	if (constType.equals("Integer"))
+        	tempString = constVal; 
+	else if (constType.equals("Long"))
+        	tempString = constVal; 
+        else if (constType.equals("Float"))
+        	tempString = constVal; 
+        else if (constType.equals("Double"))
+        	tempString = constVal; 
+        else if (constType.equals("String"))
+        {
+        	tempString = "\""+ConstantVal.get(Integer.parseInt(constVal)).toString()+"\"";
+        	type = "String";
+        }
+        else if (constType.equals("Class"))
+        {
+        	tempString = ConstantVal.get(Integer.parseInt(constVal)).toString();
+        	//while (tempString.indexOf("/") != -1)
+        	//   tempString = tempString.substring(tempString.indexOf("/")+1);
+        }
+        else if (constType.equals("NameAndType"))	
+	{
+        	temp1 = Integer.parseInt(constVal.substring(0, constVal.indexOf(",")));
+        	temp2 = Integer.parseInt(constVal.substring(constVal.indexOf(",")+1));        		
+        	tempString = ConstantVal.get(temp1).toString() + ConstantVal.get(temp2).toString();
+        }
+        else if (constType.equals("Fieldref"))	
+        {
+        	temp1 = Integer.parseInt(constVal.substring(0, constVal.indexOf(",")));
+        	temp2 = Integer.parseInt(constVal.substring(constVal.indexOf(",")+1));
+        	if (!resolveConstant(temp1).toString().equals(ClassName))
+        	{	
+        		tempString = resolveConstant(temp1) + ".";
+        		//System.out.println("1:" + tempString);
+ 		}
+        	else
+        		tempString = "";
+        	tempString += resolveConstant(temp2);
+        		//System.out.println("2:" + tempString);
+        	tempString = tempString.substring(0,tempString.length()-1);
+        		//System.out.println("3:" + tempString);
+        	if (tempString.indexOf("[")!=-1)
+        	   tempString = tempString.substring(0,tempString.length()-1);
+        		//System.out.println("4:" + tempString);
+        }
+        else if (constType.equals("Methodref") || constType.equals("InterfaceMethodref"))	
+        {
+        	temp1 = Integer.parseInt(constVal.substring(0, constVal.indexOf(",")));
+        	temp2 = Integer.parseInt(constVal.substring(constVal.indexOf(",")+1));        		
+        	tempString = resolveConstant(temp1) + ".";	
+        	tempString += resolveConstant(temp2);	
+        }
+        else
+        {
+        	tempString = "Error";
+        }       
+ 
+        return tempString;
+      }
+      
+      public void oStackDebug(String calledFrom)
+      {
+       Stack tempStack = new Stack();
+       while (!oStack.empty())
+       	 tempStack.push(oStack.pop());
+       System.out.println("oStackDebug called from " + calledFrom + "."); 
+       for(int i=1; !tempStack.empty(); i++)
+       {
+         System.out.println("oStack" + i + ": " + tempStack.peek().toString());
+         oStack.push(tempStack.pop());
+       } 
+      }  
+      
+      public void finalStackDebug(String calledFrom)
+      {
+       Stack tempStack = new Stack();
+       while (!finalStack.empty())
+       	 tempStack.push(finalStack.pop());
+       System.out.println("finalStackDebug called from " + calledFrom + ".");
+       for(int i=1; !tempStack.empty(); i++)
+       {
+         System.out.println("finalStack" + i + ": " + tempStack.peek().toString());
+         finalStack.push(tempStack.pop());
+       } 
+      }          
+      
+      public void varTypesDebug(String calledFrom)
+      {
+       System.out.println("Current contents of VarTypes:");
+       for(int i=0; i<VarTypes.size(); i++)
+       {
+         System.out.println(i + ": " + VarTypes.get(i));
+       } 
+      }    
+      
+      public void checkVarType(char varType)
+      {
+        String tempVarType, tempString;
+        int index=0;
+        switch (varType)
+	{
+	  case 'B':
+	    tempVarType = "byte";
+	    break;
+	  case 'C':
+	    tempVarType = "char";
+	    break;
+	  case 'S':
+	    tempVarType = "short";
+	    break;
+	  case 'Z':
+	    tempVarType = "boolean";
+	    break;
+	  default:
+	    return;
+	}
+	tempString = oStack.pop().toString();
+	if (tempVarType.equals("boolean") 
+	    && tempString.equals("0"))
+	{
+	    oStack.push("false");
+	    return;
+	}
+	if (tempVarType.equals("boolean") 
+	    && tempString.equals("1"))
+	{
+	    oStack.push("true");
+	    return;
+	}
+		
+	if (tempString.startsWith("local"))
+	{
+		try {
+		  index = Integer.parseInt(tempString.substring(5));	
+		} catch (NumberFormatException e) {  //failure
+		  oStack.push(tempString);
+		  return;
+		}
+	   if (!VarTypes.get(index).toString().equals(tempVarType))
+	   {
+	   	Stack tempStack=new Stack();
+	   	String stackString;
+	   	//success; variable type needs to be switched.
+	   	VarTypes.set(index,tempVarType);
+	   	while (!oStack.empty())
+	   	{
+	   	  stackString = oStack.pop().toString();
+	   	  if (stackString.indexOf("<")==-1 && stackString.indexOf(">")==-1)
+	   	  	stackString = stackString.replaceAll(tempString, "(int) " + tempString);
+	   	  tempStack.push(stackString);
+	   	}
+	   	while (!tempStack.empty())
+	   	  oStack.push(tempStack.pop());
+	   	while (!finalStack.empty()
+	   		&& finalStack.peek().toString().indexOf("int "+tempString)!=0)
+	   	{
+	   	  stackString = finalStack.pop().toString();
+	   	  if (stackString.indexOf("<")==-1 && stackString.indexOf(">")==-1)
+	   	  	stackString = stackString.replaceAll(tempString, "(int) " + tempString);
+	   	  stackString = stackString.replaceAll("(char)(int)" + tempString, tempString);
+	   	  tempStack.push(stackString);
+	   	}
+	   	stackString = finalStack.pop().toString();
+		stackString = stackString.replaceFirst("int", "char");
+		if (varType == 'C' && stackString.indexOf("=")!=-1)
+		   {
+		  	int charvalue=0;
+		  	String dammit;
+		 	try {
+		   	  charvalue = Integer.parseInt(stackString.substring(stackString.indexOf("=")+1,stackString.indexOf(";")));	
+		   	} catch (NumberFormatException e) { //the variable isn't initialized to a constant.
+	   		  tempStack.push(stackString);
+		   	  while (!tempStack.empty())
+		   	    finalStack.push(tempStack.pop());
+			  oStack.push(tempString);
+		   	  return;
+			}
+			if (charvalue>32)
+			    stackString = stackString.substring(0,stackString.indexOf("=")) + "=\'" + (char) charvalue + "\'" +stackString.substring(stackString.indexOf(";"));
+	   	   }
+		tempStack.push(stackString);
+	   	while (!tempStack.empty())
+	   	  finalStack.push(tempStack.pop());
+		oStack.push(tempString);
+	   }
+	   else
+		{  //failure
+		   oStack.push(tempString);
+		   return;
+		}
+	}
+	else
+	{
+	   //failure
+	   oStack.push(tempString);
+	   return;
+	}
+      }                       
+        :}
+        
+init with {:
+          :}
+
+terminal ROOT, MAGICNUM, MAJORVER, MINORVER, CPCOUNT, CONSTPOOL, CPTAG, CPINDEX, TYPETAG, ACCFLAGS;
+terminal XROOT, XMAGICNUM, XMAJORVER, XMINORVER, XCPCOUNT, XCONSTPOOL, XCPTAG, XCPINDEX, XTYPETAG, XACCFLAGS;
+terminal NAMEINDEX, DESCINDEX, VALTAG, THISCL, SUPERCL, INTCNT, INTERFACES, FIELDCNT, FIELDS, FIELD;
+terminal XNAMEINDEX, XDESCINDEX, XVALTAG, XTHISCL, XSUPERCL, XINTCNT, XINTERFACES, XFIELDCNT, XFIELDS, XFIELD;
+terminal METHCNT, METHODS, METHOD, ATTCNT, ATTRIBS, ATTRIB, ATTTYPE, ATTTYPEINDEX, ATTLENGTH, MAXSTACK, MINSTACK;
+terminal XMETHCNT, XMETHODS, XMETHOD, XATTCNT, XATTRIBS, XATTRIB, XATTTYPE, XATTTYPEINDEX, XATTLENGTH, XMAXSTACK, XMINSTACK;
+terminal CODELEN, CODETAG, LINETAG, EXCLEN, EXCTABLES, EXCTABLE, CODEATTCNT, CODEATTNAME, CODEATTLEN, LNTABLECNT, LINENUMTABLE;
+terminal XCODELEN, XCODETAG, XLINETAG, XEXCLEN, XEXCTABLES, XEXCTABLE, XCODEATTCNT, XCODEATTNAME, XCODEATTLEN, XLNTABLECNT, XLINENUMTABLE;
+terminal LINENUM, LNMAP, STARTPC, ENDPC, HANDLER, CATCHTYPE, EXCNUM, EXCEPTIONS, EXCEPTION, SRCFILE, CONSTIDX;
+terminal XLINENUM, XLNMAP, XSTARTPC, XENDPC, XHANDLER, XCATCHTYPE, XEXCNUM, XEXCEPTIONS, XEXCEPTION, XSRCFILE, XCONSTIDX;
+terminal ICLASSNUM, ICLASSES, ICLASS, ICLASSIDX, OCLASSIDX, ICLASSNAME;
+terminal XICLASSNUM, XICLASSES, XICLASS, XICLASSIDX, XOCLASSIDX, XICLASSNAME;
+
+terminal ACCESS, PROPERTY, CONSTNAME, CONSTANT, DECIMALPT, COMMA, DEFAULT;
+terminal CHARRAY, INTEGER, FLOAT, LONG, DOUBLE, STRING, CLASSREF, FIELDREF, METHODREF, INTERFACEREF, NAMEANDTYPE;
+terminal NEGATIVE, HEXNUM, NUMBER, TYPE, ATTRIBNAME;
+terminal NOP, CONST, IPUSH, LDC, LOAD, STORE, POP, POP2, DUP, DUPX, NEW, ASTORE, ALOAD, NEWARRAY, ARRAYLENGTH;
+terminal SWAP, NEG, ADD, SUB, MUL, DIV, REM, SHL, SHR, AND, OR, XOR, IINC;
+terminal T2T, CMP, IF, IF_ICMP, GOTO, JSR, RET, RETURN;
+terminal TABLESWITCH, LOOKUPSWITCH, GETSTATIC, GETFIELD, PUTSTATIC, PUTFIELD;
+terminal INVOKE, ATHROW, CHECKCAST, INSTANCEOF;
+terminal MONITORENTER, MONITOREXIT, WIDE, MULTIANEWARRAY, M1, NULL;
+
+non terminal startfile, file, constantpool, constantelement, classname, interfaces, fields, field, methods, method;
+non terminal attribaccum, attribs, attrib, definitionparts, stmts, expr_part, other;
+non terminal property, properties, number, type, access, return, invoke;
+non terminal load, ipush, iinc, const, stackops, cmp, if_icmp, if, store, goto, arithops, bitops, conv;
+non terminal object, tableswitch, lookupswitch, switchpairs, arrayops, arraylength, astore, aload, newarray;
+non terminal codeattribs, endcodeattribs, linenumtable, linenummapping, exceptiontables, exceptiontable, exceptions, innerclasses;
+
+
+start with file;
+
+startfile ::=   number DECIMALPT number ROOT MAGICNUM HEXNUM XMAGICNUM MINORVER number XMINORVER MAJORVER number XMAJORVER 
+		{:	//We use this symbol so we have the chance to set up variables before parsing begins.
+	        	ConstantType.add(null); //To match the strangely stupid 1-indexed java constant pool
+        		ConstantVal.add(null); //To match the strangely stupid 1-indexed java constant pool
+		:}
+		;
+
+file    ::=     startfile CPCOUNT number XCPCOUNT CONSTPOOL constantpool XCONSTPOOL classname interfaces FIELDCNT number XFIELDCNT FIELDS XFIELDS METHCNT number XMETHCNT METHODS methods XMETHODS ATTCNT number XATTCNT ATTRIBS attribs XATTRIBS XROOT
+			{: 
+                        	while (!importStack.empty())
+                        		System.out.println(importStack.pop());
+                        		
+                        	System.out.println("\n" + ClassInfo + "\n" + finalMethods + "\n}");
+                        :}
+                | startfile CPCOUNT number XCPCOUNT CONSTPOOL constantpool XCONSTPOOL classname interfaces FIELDCNT number XFIELDCNT FIELDS XFIELDS METHCNT number XMETHCNT METHODS methods XMETHODS ATTCNT number XATTCNT XROOT
+			{: 
+                        	while (!importStack.empty())
+                        		System.out.println(importStack.pop());
+                        		
+                        	System.out.println("\n" + ClassInfo + "\n" + finalMethods + "\n}");
+                        :}
+                | startfile CPCOUNT number XCPCOUNT CONSTPOOL constantpool XCONSTPOOL classname interfaces FIELDCNT number XFIELDCNT FIELDS fields XFIELDS METHCNT number XMETHCNT METHODS methods XMETHODS ATTCNT number XATTCNT ATTRIBS attribs XATTRIBS XROOT
+                        {: 
+                        	Stack tempStack = new Stack();
+                        	
+                        	while (!importStack.empty())
+                        		System.out.println(importStack.pop());
+                        		
+                        	System.out.println("\n" + ClassInfo);
+                        	while (!fieldStack.empty())
+                        		tempStack.push(fieldStack.pop());
+                        	while (!tempStack.empty())
+                        		System.out.println(tempStack.pop());
+                        		
+                        	System.out.println("\n" + finalMethods + "\n}");
+                        :}
+                | startfile CPCOUNT number XCPCOUNT CONSTPOOL constantpool XCONSTPOOL classname interfaces FIELDCNT number XFIELDCNT FIELDS fields XFIELDS METHCNT number XMETHCNT METHODS methods XMETHODS ATTCNT number XATTCNT XROOT
+                        {: 
+                        	Stack tempStack = new Stack();
+                        	
+                        	while (!importStack.empty())
+                        		System.out.println(importStack.pop());
+                        		
+                        	System.out.println("\n" + ClassInfo);
+                        	while (!fieldStack.empty())
+                        		tempStack.push(fieldStack.pop());
+                        	while (!tempStack.empty())
+                        		System.out.println(tempStack.pop());
+                        		
+                        	System.out.println("\n" + finalMethods + "\n}");
+                        :}
+                ;
+       
+attribaccum ::= ATTRIBS attribs XATTRIBS
+		| ATTRIBS XATTRIBS
+		;
+
+attribs ::=	attribs attrib
+		| attrib
+		;
+       
+attrib ::=	ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH SRCFILE number XSRCFILE XATTRIB
+		| ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH CONSTIDX number XCONSTIDX XATTRIB
+		| ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH EXCNUM number XEXCNUM EXCEPTIONS exceptions XEXCEPTIONS XATTRIB
+		| ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH ICLASSNUM number XICLASSNUM ICLASSES innerclasses XICLASSES XATTRIB
+		| ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH XATTRIB
+		;
+        
+
+constantpool   ::=  constantpool CPTAG constantelement XCPTAG
+			{: /*System.out.println(ConstantVal.get(ConstantVal.size()-1));*/ :}
+			| CPTAG constantelement XCPTAG
+		;
+
+constantelement ::=  CPINDEX number:n XCPINDEX TYPETAG CONSTANT CHARRAY:t XTYPETAG VALTAG CONSTNAME:s XVALTAG
+                        {: 
+                        	String tempString = s.toString().substring(8);
+                        	int tempIndex;
+                        	ConstantType.add(t);
+                        	
+                        	while (tempString.indexOf("&gt;")!=-1)
+				{
+				  tempIndex = tempString.indexOf("&gt;");
+				  tempString = tempString.substring(0, tempIndex) + ">" + tempString.substring(tempIndex+4);
+				}
+
+                		while (tempString.indexOf("&lt;")!=-1)
+				{
+				  tempIndex = tempString.indexOf("&lt;");
+				  tempString = tempString.substring(0, tempIndex) + "<" + tempString.substring(tempIndex+4);
+				}
+                        	
+                        	while (tempString.indexOf("\\ ")!=-1)
+                        	{
+                        	  tempIndex = tempString.indexOf("\\ ");
+                        	  tempString = tempString.substring(0, tempIndex) + tempString.substring(tempIndex+1);
+                        	}
+                        	ConstantVal.add(tempString);
+                        	
+                        	if (tempString.startsWith("java/"))
+                        	{
+                        	  tempString = tempString.substring(5);
+                        	  while (tempString.indexOf("/")!=-1)
+                        	   {
+                        	     tempIndex = tempString.indexOf("/");
+                        	     tempString = tempString.substring(0,tempIndex) + "." + tempString.substring(tempIndex+1);
+                        	   }
+                        	  if (!tempString.startsWith("lang") &&
+                        	      !tempString.equals("io.PrintStream"))
+                        	  	importStack.add("import java."+tempString+";");
+                        	}
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT INTEGER:t XTYPETAG VALTAG number:intVal XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(intVal);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT INTEGER:t XTYPETAG VALTAG NEGATIVE number:intVal XVALTAG
+                        {:  
+                        	ConstantType.add(t);
+                        	ConstantVal.add("-" + intVal);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT LONG:t XTYPETAG VALTAG number:longVal XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(longVal);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT LONG:t XTYPETAG VALTAG NEGATIVE number:longVal XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add("-" + longVal);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT FLOAT:t XTYPETAG VALTAG number:f1 DECIMALPT number:f2 XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(f1.toString() + "." + f2.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT FLOAT:t XTYPETAG VALTAG NEGATIVE number:f1 DECIMALPT number:f2 XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add("-" + f1.toString() + "." + f2.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT DOUBLE:t XTYPETAG VALTAG number:d1 DECIMALPT number:d2 XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+				ConstantVal.add(d1.toString() + "." + d2.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT DOUBLE:t XTYPETAG VALTAG NEGATIVE number:d1 DECIMALPT number:d2 XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+				ConstantVal.add("-" + d1.toString() + "." + d2.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT STRING:t XTYPETAG VALTAG number:index XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(index);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT CLASSREF:t XTYPETAG VALTAG number:index XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(index);
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT FIELDREF:t XTYPETAG VALTAG number:classindex COMMA number:NaTindex XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(classindex.toString()+","+NaTindex.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT METHODREF:t XTYPETAG VALTAG number:classindex COMMA number:NaTindex XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(classindex.toString()+","+NaTindex.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT INTERFACEREF:t XTYPETAG VALTAG number:classindex COMMA number:NaTindex XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(classindex.toString()+","+NaTindex.toString());
+                        :}
+		|  CPINDEX number:n XCPINDEX TYPETAG CONSTANT NAMEANDTYPE:t XTYPETAG VALTAG number:nameindex COMMA number:typeindex XVALTAG
+                        {: 
+                        	ConstantType.add(t);
+                        	ConstantVal.add(nameindex.toString()+","+typeindex.toString());
+                        :}
+                | error
+		;
+
+classname ::=   ACCFLAGS access:a XACCFLAGS THISCL number:classnum XTHISCL SUPERCL number:supernum XSUPERCL
+		 {: 	
+		 	ClassName = resolveConstant(Integer.parseInt(classnum.toString()));
+		 	String SuperName = resolveConstant(Integer.parseInt(supernum.toString()));
+    			while (SuperName.indexOf("/")!=-1)
+			   SuperName = SuperName.substring(SuperName.indexOf("/")+1);
+		 	
+		 	if (!SuperName.equals("Object"))
+		 	   ClassInfo = (a.toString() + " class " + ClassName + " extends " + SuperName + "\n{");
+		 	else
+		 	   ClassInfo = (a.toString() + " class " + ClassName + "\n{");
+		 :}
+	    ;
+	    
+interfaces ::=  INTCNT number XINTCNT INTERFACES XINTERFACES
+		{: :}
+	    ;
+
+fields ::=  fields FIELD field XFIELD | FIELD field XFIELD
+	    ;
+	    
+field ::=   ACCFLAGS access:a definitionparts:params ATTCNT number XATTCNT attribaccum
+	     {:
+		   String tempString = ConstantVal.get(Integer.parseInt(params.toString())).toString();
+//System.out.println("  " + tempString + ";");         
+		   String parameters = "", brackets="";
+		   int numofarrays=0;
+		   
+  		   for (int numOfParam = 0; numOfParam<tempString.length(); numOfParam++)
+		 	{       
+		 	  switch (tempString.charAt(numOfParam))
+ 			  {
+ 			   case 'Z':
+ 			  	parameters = "boolean";
+ 			  	break;
+ 			   case 'B':
+ 			  	parameters = "byte";
+ 			  	break;
+ 			   case 'C':
+ 			  	parameters = "char";
+ 			  	break;
+ 			   case 'I':
+ 			   	parameters = "int";
+ 			   	break;
+ 			   case 'S':
+ 			  	parameters = "short";
+ 			  	break;
+ 			   case 'J':
+ 			   	parameters = "long";
+ 			   	break;
+ 			   case 'F':
+ 			   	parameters = "float";
+ 			   	break;
+ 			   case 'D':
+ 			   	parameters = "double";
+ 			   	break;
+ 			   case 'L':
+ 			   	parameters = tempString.substring(numOfParam+1,tempString.indexOf(";"));
+			   	numOfParam += parameters.length();
+			   	while (parameters.indexOf("/") != -1)
+			   	    parameters = parameters.substring(parameters.indexOf("/")+1);
+			   	break;
+ 			   case '[':
+ 			   	numofarrays++;
+ 			   	break;
+ 			   default:
+ 			   	break;
+ 			  }
+ 			}
+ 		  while (numofarrays-->0)
+ 		    {
+ 		      brackets+="[]";
+ 		    }
+                  fieldStack.add("  " + a.toString() + " " + MethodProperties + parameters + brackets + " " 
+                  	            + MethodName + ";");
+//System.out.println("  " + a.toString() + " " + MethodProperties + parameters + brackets + " " + MethodName + ";");
+		  FieldType.add(parameters+brackets);
+		  FieldName.add(MethodName);
+		  MethodName = "";
+		  MethodProperties = "";
+		  staticAdjustment = 0;
+	    :}
+	    ;
+
+methods   ::=     methods METHOD method XMETHOD | METHOD method XMETHOD
+                ;
+                
+codeattribs ::= ATTCNT number XATTCNT ATTRIBS ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH MAXSTACK number XMAXSTACK MINSTACK number XMINSTACK EXCLEN number XEXCLEN EXCTABLES exceptiontables XEXCTABLES CODELEN number XCODELEN CODETAG
+		| ATTCNT number XATTCNT ATTRIBS ATTRIB ATTTYPE ATTRIBNAME XATTTYPE ATTTYPEINDEX number XATTTYPEINDEX ATTLENGTH number XATTLENGTH MAXSTACK number XMAXSTACK MINSTACK number XMINSTACK EXCLEN number XEXCLEN EXCTABLES XEXCTABLES CODELEN number XCODELEN CODETAG
+		;
+
+endcodeattribs ::= XCODETAG CODEATTCNT number XCODEATTCNT CODEATTNAME number XCODEATTNAME CODEATTLEN number XCODEATTLEN LNTABLECNT number XLNTABLECNT LINENUMTABLE linenumtable XLINENUMTABLE XATTRIB XATTRIBS
+		;
+
+linenumtable ::= linenumtable LNMAP linenummapping XLNMAP | LNMAP linenummapping XLNMAP
+		;
+		
+linenummapping ::= 
+		| STARTPC number XSTARTPC LINENUM number XLINENUM
+		;
+
+exceptiontables ::= exceptiontables EXCTABLE exceptiontable XEXCTABLE
+		| EXCTABLE exceptiontable XEXCTABLE
+		;
+
+exceptiontable  ::= STARTPC number:StartPC XSTARTPC ENDPC number:EndPC XENDPC HANDLER number:HandlerPC XHANDLER CATCHTYPE number:CatchType XCATCHTYPE
+		{:
+	           ExceptionTables.add(new ExceptionTable(Integer.parseInt(StartPC.toString()), Integer.parseInt(EndPC.toString()), Integer.parseInt(HandlerPC.toString()), Integer.parseInt(CatchType.toString())));
+		:}
+		;
+		
+exceptions      ::= exceptiontables EXCEPTION number XEXCEPTION
+		| EXCEPTION number XEXCEPTION
+		;
+		
+innerclasses    ::= innerclasses ICLASS ICLASSIDX number XICLASSIDX OCLASSIDX number XOCLASSIDX ICLASSNAME number XICLASSNAME ACCFLAGS HEXNUM XACCFLAGS XICLASS
+		| ICLASS ICLASSIDX number XICLASSIDX OCLASSIDX number XOCLASSIDX ICLASSNAME number XICLASSNAME ACCFLAGS HEXNUM XACCFLAGS XICLASS
+		;
+
+
+method  ::=     ACCFLAGS access:a definitionparts:desc 
+		 {:
+		        if (MethodProperties.toString().indexOf("static")==-1)
+			  VarTypes.add(ClassName);
+                        String parameters="", tempString;
+                 	int tempInt, numOfParam, offset = 1;
+			boolean useArray = false;
+		 	MethodParam = ConstantVal.get(Integer.parseInt(desc.toString())).toString();
+		 	Stack tempStack = new Stack();
+		 	
+		
+			switch (MethodParam.charAt(MethodParam.indexOf(")")+1))
+			{
+			  case 'B':
+			    returnType = "byte";
+			    break;
+			  case 'C':
+			    returnType = "char";
+			    break;
+			  case 'I':
+			    returnType = "int";
+			    break;
+			  case 'S':
+			    returnType = "short";
+			    break;
+			  case 'J':
+			    returnType = "long";
+			    break;
+			  case 'F':
+			    returnType = "float";
+			    break;
+			  case 'D':
+			    returnType = "double";
+			    break;
+			  case 'Z':
+			    returnType = "boolean";
+			    break;
+			  case 'L':
+			    returnType = MethodParam.substring(MethodParam.indexOf(")")+2);
+			    while (returnType.indexOf("/") != -1)
+			   	    returnType = returnType.substring(returnType.indexOf("/")+1);
+			    returnType = returnType.substring(0,returnType.indexOf(";"));
+			    break;
+			  case 'V':
+			  default:
+			    break;			  
+			}
+			
+					
+			for (numOfParam = 0; numOfParam+offset<MethodParam.indexOf(")"); numOfParam++)
+			{                        
+			  if (numOfParam !=0)
+			     parameters +=", ";
+			  switch (MethodParam.charAt(numOfParam+offset))
+			  {
+			   case 'B':
+			  	parameters += "byte";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"byte");	
+			  	break;
+			   case 'C':
+			  	parameters += "char";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"char");	
+			  	break;
+			   case 'I':
+			   	parameters += "int";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"int");	
+			   	break;
+			   case 'S':
+			  	parameters += "short";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"short");	
+			  	break;
+			   case 'J':
+			   	parameters += "long";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"long");	
+			   	break;
+			   case 'F':
+			   	parameters += "float";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"float");	
+			   	break;
+			   case 'D':
+			   	parameters += "double";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"double");	
+			   	break;
+			   case 'Z':
+			   	parameters += "boolean";
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,"boolean");	
+			   	break;
+			   case 'L':
+//System.out.println(numOfParam + " " + offset + " " + MethodParam + " " + (MethodParam.substring(numOfParam+offset+1).indexOf(";")+numOfParam+offset+1));
+//System.out.println(MethodParam.substring(numOfParam+offset+1,MethodParam.substring(numOfParam+offset+1).indexOf(";")+numOfParam+offset+1));
+			   	tempString = MethodParam.substring(numOfParam+offset+1,MethodParam.substring(numOfParam+offset+1).indexOf(";")+numOfParam+offset+1);
+			   	while (tempString.indexOf("/") != -1)
+			   	    tempString = tempString.substring(tempString.indexOf("/")+1);
+			   	tempInt = (MethodParam.substring(numOfParam+offset+1).indexOf(";")+numOfParam+offset+1) - (numOfParam+offset+1);
+			   	parameters += tempString;
+			   	offset += tempInt+1; //Add semicolon, too
+			  	VarTypes.add(numOfParam + 1 + staticAdjustment,tempString);	
+			   	break;
+			   case '[':
+			   	useArray = true;
+			   	numOfParam--;
+			   	offset++;
+			   	break;
+			   default:
+			   	break;
+			  }
+					  
+			  if (useArray && !(MethodParam.charAt(numOfParam+offset) == '['))
+			  {
+			  	parameters +="[] ";
+			  	VarTypes.set(numOfParam + 1 + staticAdjustment,VarTypes.get(numOfParam + 1 + staticAdjustment)+"[");
+			  	useArray = false;
+			  	if (MethodName.toLowerCase().equals("main")
+			  	    && MethodProperties.indexOf("static")!=-1
+			  	    && a.toString().indexOf("public")!=-1
+			  	    && returnType.equals("void")
+			  	    && parameters.indexOf("String")!=-1)
+			  	  {
+			  	       parameters += "args";
+			  	       argsSubstitute = true;
+			  	  }
+			  	else
+			  	       parameters += "local" + (numOfParam + 1 + staticAdjustment);
+			  }  
+			  else if (!useArray)
+			  	parameters += " local" + (numOfParam + 1 + staticAdjustment);
+			  	
+			  if((numOfParam + 1 + staticAdjustment)>-1)
+			  {
+			  	varsInUse.set(numOfParam + 1 + staticAdjustment);
+			  	
+			  }
+		         }
+		         MethodParam = parameters;
+		 :}
+		codeattribs stmts endcodeattribs
+                 {: 
+                 	String outString="    }";
+                 	int tempInt;
+                        
+                        while (level > 0)
+                         {
+//System.out.println(level + "\"" + space + "\"");
+                            outString = space + "    }\n" + outString;
+			    if (space.length() > 3)
+				space = space.substring(3);
+                            level--;
+                         }
+                           
+                        String tempSource;
+                        
+                        while (!finalStack.empty())
+                         {
+			   //tempInt=finalStack.peek().toString().indexOf("//");
+			   //if (tempInt == -1)
+			      tempInt=finalStack.peek().toString().length();
+			   tempSource = finalStack.pop().toString().substring(0, tempInt);
+			   if (argsSubstitute && tempSource.indexOf("local0")!=-1)	
+			   {
+			   	tempSource = tempSource.substring(0,tempSource.indexOf("local0")) 
+			   			+ "args" + tempSource.substring(tempSource.indexOf("local0")+6);
+			   }
+			   outString=("     " + tempSource + "\n" + outString);
+                         }
+                        
+                        outString=("  "+a.toString() + MethodProperties + returnType + " " + MethodName  + "(" + MethodParam + ") \n    {\n" + outString);
+                        space = "";
+                        returnType="void";
+                        MethodProperties="";
+                        MethodParam="";
+                        outstandingType="";
+			argsSubstitute = false;
+                        staticAdjustment=0;
+                        lineNum=0;
+                        varsInUse.clear();
+                        if (!MethodName.equals("<init>") && !MethodName.equals("<clinit>"))
+                        {
+                          if (!finalMethods.equals(""))
+                        	finalMethods += "\n\n" + outString;
+                          else
+                          	finalMethods = outString;
+                        }
+                        oStack.clear();
+                        ifStack.clear();
+        		ExceptionTables.clear();
+        		VarTypes.clear();
+                  :}
+                ;
+                
+definitionparts::= properties XACCFLAGS NAMEINDEX number:name XNAMEINDEX DESCINDEX number:params XDESCINDEX 
+		{:
+		   MethodName = ConstantVal.get(Integer.parseInt(name.toString())).toString();
+		   RESULT= params;
+		 :} 
+		 
+		 | XACCFLAGS NAMEINDEX number:name XNAMEINDEX DESCINDEX number:params XDESCINDEX 
+		{:
+		   MethodName = ConstantVal.get(Integer.parseInt(name.toString())).toString();
+		   RESULT= params;
+		 :}
+               ;
+                
+stmts   ::=     stmts LINETAG expr_part XLINETAG
+		{:
+		   Stack tempStack = new Stack();
+//System.out.println(MethodName + ": " + ++lineNum);
+		   //oStackDebug("stmts");
+		   //finalStackDebug("stmts");
+		   //varTypesDebug("stmts");
+		   int splice = -1, counter=0;
+		   if (!ifStack.empty() && !gotoStack.empty())
+		   {
+		     int ifpos=Integer.parseInt(ifStack.peek().toString());
+		     int gotopos=Integer.parseInt(gotoStack.peek().toString());
+		     if (ifpos < gotopos)
+	 	       {
+			temp = finalStack.pop();
+			if (space.length() > 3)
+				space = space.substring(3);
+			finalStack.push(space + "  }");
+			finalStack.push(space + "else");
+        		finalStack.push(space + "  {");
+			finalStack.push(temp.toString());
+			space = space + "   "; 
+			ifStack.pop();
+		       }
+		   }
+		   else if (!ifStack.empty())
+		   {
+		     int branchline=Integer.parseInt(ifStack.peek().toString());
+		     String tempString;
+//System.out.println("current line: " + lineNum + ">=? if:"+ branchline + " ");
+		     if (!skipFinish && lineNum == branchline)
+   		      {
+			tempString = finalStack.pop().toString();
+			if (tempString.trim().endsWith("//" + branchline))
+			{
+				if (space.length() >= 3)
+				   space = space.substring(3);
+
+				finalStack.push(space + "  }");
+				finalStack.push(tempString.substring(3));
+				level--;
+				ifStack.pop();
+			}
+			else
+			{
+				if (space.length() >= 3)
+				   space = space.substring(3);
+
+				finalStack.push(tempString);
+				finalStack.push(space + "  }");
+				level--;
+				ifStack.pop();
+			}
+			while (!ifStack.empty() && lineNum == branchline)
+   			{
+				if (space.length() >= 3)
+				   space = space.substring(3);
+   				finalStack.push(space + "  }");
+   				level--;
+   				ifStack.pop();	   
+		     		branchline=Integer.parseInt(ifStack.peek().toString());
+   			}
+   		      }
+   		     else if (skipFinish)
+   		        skipFinish = false;
+  		  }
+		   if (!finalStack.empty())
+		   {
+		      splice = finalStack.peek().toString().indexOf("//");
+		      
+		      while (splice == -1  && !finalStack.empty())
+		      {
+		   	tempStack.push(finalStack.pop());
+		   	if (!finalStack.empty())
+		            splice = finalStack.peek().toString().indexOf("//");
+		      }
+		      
+		      if (finalStack.empty())
+		      {
+		        while (!tempStack.empty())
+		          finalStack.push(tempStack.pop());
+		      }
+		 
+//System.out.println("Splice =" + splice + "; ifStack Empty? " + ifStack.empty());
+		   }
+  		  if (!switchStack.empty() && splice>-1)
+		  	{
+		  	   int branchline=Integer.parseInt(finalStack.peek().toString().substring(splice+2));
+		  	   Switch tempSwitch = (Switch) switchStack.pop();
+//System.out.println(branchline + "; "+ tempSwitch.branchpointIdx + "; "+ tempSwitch.endBranch);
+		  	   if (tempSwitch.endBranch == branchline)
+		  	   {
+		  	      tempStack.push(finalStack.pop().toString().substring(4));
+			      space = tempSwitch.origspace;
+			      if (space.length() > 2)
+			        space = space.substring(2);
+			      else
+			        space = "";
+			      finalStack.push (space + "}");
+			      if (space.length() > 2)
+			        space = space.substring(2);
+			      else
+			        space = "";
+			      level--;
+			   }
+		  	   else if (tempSwitch.endBranch!=0 && tempSwitch.branchpointIdx > tempSwitch.branchpoints.size())
+		  	   {
+			      space = tempSwitch.origspace;
+			      if (space.length() > 2)
+			        space = space.substring(2);
+			      else
+			        space = "";
+			      finalStack.push (space + "}");
+			      if (space.length() > 2)
+			        space = space.substring(2);
+			      else
+			        space = "";
+			      level--;
+			   }
+		  	   else if (!tempSwitch.defaultSet && (branchline >= tempSwitch.defaultBranch) && tempSwitch.branchpointIdx == tempSwitch.branchpoints.size())
+		  	   {
+			      tempStack.push(finalStack.pop());
+			      space = tempSwitch.origspace;
+			      finalStack.push (space + "default: //" + tempSwitch.defaultBranch);
+			      space = space + "  ";
+			      tempSwitch.branchpointIdx++;
+			      tempSwitch.defaultSet = true;
+			      switchStack.push(tempSwitch);
+			   }
+		  	   else if (!tempSwitch.defaultSet && tempSwitch.branchpointIdx == 0 && tempSwitch.defaultBranch <= branchline)
+		  	   {
+			      tempStack.push("  " +  finalStack.pop());
+			      space = tempSwitch.origspace;
+			      finalStack.push (space + "default: //" + tempSwitch.defaultBranch);
+			      tempSwitch.defaultSet = true;
+			      switchStack.push(tempSwitch);
+			   }
+		  	   else if (tempSwitch.branchpointIdx < tempSwitch.branchpoints.size() && branchline > Integer.parseInt(tempSwitch.branchpoints.get(tempSwitch.branchpointIdx).toString()))
+		  	   {
+//System.out.println(branchline + " > "+ Integer.parseInt(tempSwitch.branchpoints.get(tempSwitch.branchpointIdx).toString()));
+			      if (tempSwitch.branchpointIdx==0)
+			         tempStack.push("  " + finalStack.pop());
+			      else
+			         tempStack.push(finalStack.pop());
+			      space = tempSwitch.origspace;
+			      finalStack.push (space + "case " + tempSwitch.cases.get(tempSwitch.branchpointIdx) +": //" + tempSwitch.branchpoints.get(tempSwitch.branchpointIdx));
+			      space = space + "  ";
+			      tempSwitch.branchpointIdx++;
+			      switchStack.push(tempSwitch);
+			   }
+			   else
+			   {
+			      switchStack.push(tempSwitch);
+			   }
+		        }
+		   if (!finalStack.empty())
+		   {
+		      splice = finalStack.peek().toString().indexOf("//");
+		      
+		      while (splice == -1  && !finalStack.empty())
+		      {
+		   	tempStack.push(finalStack.pop());
+		   	if (!finalStack.empty())
+		            splice = finalStack.peek().toString().indexOf("//");
+		      }
+		      
+		      if (finalStack.empty())
+		      {
+		        while (!tempStack.empty())
+		          finalStack.push(tempStack.pop());
+		      }
+		 
+//System.out.println("Splice =" + splice + "; ifStack Empty? " + ifStack.empty());
+		   }
+  		  if (ExceptionTables.size()>0 && splice!=-1)
+		  	{
+		  	   int branchline=Integer.parseInt(finalStack.peek().toString().substring(splice+2));
+  		           for (int i=0; i<ExceptionTables.size(); i++)
+				{
+				   ExceptionTable XTable = (ExceptionTable) ExceptionTables.get(i);
+//System.out.println(XTable.flags);
+				   if (!finalStack.empty() && XTable.startPC <= branchline && (XTable.flags & 1)==0)
+				     {
+				       temp = finalStack.pop();
+				       if (!finalStack.empty() && !finalStack.peek().toString().trim().startsWith("try") 
+				            && !finalStack.peek().toString().trim().startsWith("catch")
+				            && !finalStack.peek().toString().trim().startsWith("finally"))
+				         {
+				       	   finalStack.push(space + "try {");
+				           space = "   " + space;
+				           finalStack.push("   " + temp);
+				         }
+				       else
+				         {
+				           finalStack.push(temp);
+				           XTable.flags += 2;
+				         }
+				       XTable.flags = (XTable.flags|0x1);
+				     }
+				   else if (XTable.endPC <= branchline && (XTable.flags & 2)==0)
+				     {
+				       space = space.substring(3);
+				       finalStack.push(space + "  }");
+				       XTable.flags = (XTable.flags|0x2);
+				     }
+				   else if (XTable.handlerPC <= branchline && (XTable.flags & 4)==0)
+				     {
+				       String tempString = finalStack.pop().toString();
+				       tempString = tempString.substring(5,tempString.indexOf("=")).trim();
+				       
+				       while (level > 0)
+				       {
+				         finalStack.push(space + "  }");
+				       	 if (space.length() > 3)
+				       	    space = space.substring(3);
+				       	 level--;
+				       }
+				       
+				       if (XTable.exceptionType != 0)
+				       		finalStack.push(space + "catch (" + resolveConstant(XTable.exceptionType) + " local" + tempString + ") {");
+				       else
+				       		finalStack.push(space + "catch (Exception local"+tempString+") {");
+				       space = "   " + space;
+				       XTable.flags = (XTable.flags|0x4);
+				     }
+				   ExceptionTables.set(i, XTable);
+				}
+		        }
+  		  
+		  while (!tempStack.empty())
+   			   finalStack.push(tempStack.pop());
+	:}
+		| LINETAG expr_part XLINETAG
+                ;
+                
+expr_part ::=   store
+                | load
+                | stackops
+                | ipush
+                | const
+                | cmp
+                | if_icmp
+                | if
+                | iinc
+                | arrayops
+                | arithops
+                | bitops
+                | conv
+                | goto
+                | number:l other {:lineNum=Integer.parseInt(l.toString());:}
+                | invoke
+                | object
+                | return
+                | tableswitch
+                | lookupswitch
+	  	;	
+
+                
+return 	::= number:l RETURN:c
+                        {: 
+                            lineNum=Integer.parseInt(l.toString());
+                            finalStack.push(space + "return; //"+l.toString());
+                        :}
+            | number:l type:t RETURN:c
+                        {: 
+                            lineNum=Integer.parseInt(l.toString());
+                            if (!oStack.empty())
+                           	finalStack.push(space + "return " + oStack.pop().toString() + "; //"+l.toString());
+                        :}
+		;
+		
+store	::= number:l type:t STORE:s number:n
+			{:
+                          lineNum=Integer.parseInt(l.toString());
+		          int EXTCnt=Integer.parseInt(l.toString());
+		          boolean skippet=false;
+			  for (int i=0; i<ExceptionTables.size(); i++)
+				{
+				   ExceptionTable XTable = (ExceptionTable) ExceptionTables.get(i);
+				   if (XTable.handlerPC <= EXTCnt && (XTable.flags & 4)==0)
+				     {
+				       temp = finalStack.pop();	
+				       if (i>0)
+				         { 
+				          ExceptionTable TempXTable = (ExceptionTable) ExceptionTables.get(i-1);
+				          if (TempXTable.startPC==XTable.startPC && TempXTable.endPC==XTable.endPC)
+				      	    {
+				   	      space = space.substring(3);
+				   	      level--;
+				   	    }
+				   	 }
+				       
+				       if (XTable.exceptionType != 0)
+				         {
+				            String tempString = resolveConstant(XTable.exceptionType);
+				            while (tempString.indexOf("/") != -1)
+				               tempString=tempString.substring(tempString.indexOf("/")+1);
+				            finalStack.push(space + "} catch (" + tempString + " local" + n.toString() + ") {");
+				            space = "   " + space;
+				            level++;
+				         }
+				       else if (!finalStack.peek().toString().trim().startsWith("finally"))
+				     	 {
+				     	    finalStack.push(space + "finally {");
+				     	    space = "   " + space;
+				     	    finalStack.push("   " + temp);
+				     	 }
+				       else
+				     	 {
+				     	    finalStack.push(temp);
+				   	    level--;
+				         }
+				       skippet = true;
+				       XTable.flags = (XTable.flags|0x4);
+				     }
+				   ExceptionTables.set(i, XTable);
+				}
+			   
+//System.out.println(l.toString() + " " + t.toString() + s.toString() + " " + n.toString());
+			   if (!oStack.empty() && !skippet)
+			   {
+			   	String tempString = oStack.pop().toString();
+			   	String storeValue = tempString;
+				if (tempString.startsWith("new") && tempString.endsWith("]"))
+				{
+				  if (!finalStack.empty())
+				  {
+//System.out.println(tempString + " = " + finalStack.peek().toString().trim() + "?");
+				   if (tempString.startsWith("new")
+				        && tempString.indexOf("[")+tempString.indexOf("]")>6
+				   	&& finalStack.peek().toString().trim().startsWith(tempString))
+				   {
+				     int numOfElements = Integer.parseInt(tempString.substring(tempString.indexOf("[")+1, tempString.indexOf("]")));
+				     tempString = "}";
+				     for (int i = 0; i<numOfElements; i++)
+					{
+				       	   String temp1 = finalStack.pop().toString();
+				  	   tempString = temp1.substring(temp1.indexOf("]=")+2,temp1.indexOf(";"))  + tempString;
+				           if ((numOfElements - i)>1)
+				   	       tempString=", " + tempString;
+				   	}
+				     tempString ="{" + tempString;
+				   }	
+				  }
+				  tempString = "local" + n.toString() + "[]="+tempString;
+				}	
+				else 
+				   tempString = "local" + n.toString() + "=" + tempString;
+				if (varsInUse.get(Integer.parseInt(n.toString())))
+				{
+					finalStack.push(space + tempString+"; //" + l);
+					if (VarTypes.get(Integer.parseInt(n.toString())).toString().equals("null"))
+					{
+					   Stack tempStack = new Stack();
+					   String tempFinal;
+					   while (!finalStack.empty())
+					      tempStack.push(finalStack.pop());
+					   
+					   while (!tempStack.empty())
+					     {
+					        tempFinal = tempStack.pop().toString();
+					        if (tempFinal.trim().startsWith("null local"))
+					          {
+					           if (type.equals("int") || type.equals("long") ||
+					               type.equals("float") || type.equals("double"))
+					            {
+					              if (tempString.indexOf("new")!=-1)
+					                {
+					                  type=tempString.substring(tempString.indexOf("new ")+4);
+					                  type=type.substring(0,type.indexOf("("));
+					                }
+					            }
+					           tempFinal = tempFinal.substring(0,tempFinal.indexOf("null local")) 
+					           		+ type + tempFinal.substring(tempFinal.indexOf("local")-1);
+//System.out.println("Test result:" + tempFinal + "; End");
+					          }
+					        finalStack.push(tempFinal);
+					     }
+					      
+					   VarTypes.set(Integer.parseInt(n.toString()),type);						
+					}
+					else if (!VarTypes.get(Integer.parseInt(n.toString())).toString().equals(type))
+					{
+						VarTypes.set(Integer.parseInt(n.toString()),type);
+//System.out.println(Integer.parseInt(n.toString()) + " " + type);
+					}
+						
+				}
+				else
+				{
+//System.out.println(Integer.parseInt(n.toString()) + " " + type);
+					if (storeValue.equals("null"))
+					   type="null";
+					while (type.indexOf("/")!=-1)
+					   type = type.substring(type.indexOf("/")+1);
+					if (t.toString().equals("d") 
+					    || t.toString().equals("l")
+					    || t.toString().equals("a"))
+					  {
+						VarTypes.add(type);
+						VarTypes.add(type);
+					  }
+					else
+						VarTypes.add(type);
+					finalStack.push(space + type + " "+ tempString+"; //" + l);
+					varsInUse.set(new Integer(n.toString()).intValue());
+				}
+			   }
+			 // else
+				//System.out.println(l.toString());
+			:}
+            ;
+            
+
+load    ::= number:l type:t LOAD:i number:n
+				{:
+                                        lineNum=Integer.parseInt(l.toString()); 
+					if (!varsInUse.get(new Integer(n.toString()).intValue()))
+						varsInUse.set(new Integer(n.toString()).intValue());
+					if (t.toString().equals("a"))
+					{
+						oStack.push("local"+n.toString());
+						
+					}	
+					else
+						oStack.push("local"+n.toString());
+				:}
+			| number:l LDC:ld number:n
+				{: 
+                                        lineNum=Integer.parseInt(l.toString()); 	
+					oStack.push(resolveConstant(Integer.parseInt(n.toString())));
+				:}
+		;
+
+invoke  ::= number:l INVOKE:s number:n
+                        {: 
+                          lineNum=Integer.parseInt(l.toString());
+                          int varCount;
+                          String tempString, variables="", tempVarTypes, typeCheck="";
+                          
+			  tempString = resolveConstant (Integer.parseInt(n.toString()));
+			  
+//System.out.println(n + " " + tempString);
+			  tempVarTypes = tempString.substring(tempString.indexOf("("),tempString.indexOf(")")+1);
+//System.out.println(tempVarTypes);
+			  while (tempVarTypes.indexOf("L") != -1 && tempVarTypes.indexOf(";") != -1)
+			  	tempVarTypes = tempVarTypes.substring(0,tempVarTypes.indexOf("L")+1) + tempVarTypes.substring(tempVarTypes.indexOf(";")+1,tempVarTypes.length());
+//System.out.println(tempVarTypes);
+			  varCount = tempVarTypes.indexOf(")") - tempVarTypes.indexOf("(")-1;
+//System.out.println(varCount);
+			  while (varCount > 0)
+			   {
+			      checkVarType(tempVarTypes.charAt(varCount));
+			      variables = oStack.pop() + ", " + variables;
+			      varCount--;
+			   }
+//System.out.println(variables);
+			  if (variables.length() > 0)
+			  	variables = variables.substring(0,variables.length()-2);
+			  
+			  typeCheck = tempString;
+			  
+			  if (s.toString().equals("invokevirtual") && typeCheck.indexOf(".")!=-1)
+	  		  	outstandingType=typeCheck.substring(0,typeCheck.indexOf("."));
+			  while (typeCheck.indexOf(")L")!=-1)
+			  {
+			  	typeCheck = typeCheck.substring(typeCheck.indexOf(")L")+1);
+			  }
+			 
+//System.out.println("TypeCheck: " + typeCheck + ", outstandingType: " + outstandingType);
+//System.out.println("TypeCheck: " + typeCheck + ", oStackPeek: " + oStack.peek().toString());
+
+
+			  if (!oStack.empty() && outstandingType.equals(ClassName) && 
+			        oStack.peek().toString().equals("local0") &&
+			        MethodProperties.indexOf("static") == -1)
+			        oStack.pop();
+
+			  if (!oStack.empty() && oStack.peek().toString().indexOf(typeCheck)!=-1)
+			  {
+			      String StackTemp = oStack.pop().toString();
+		  	      oStack.push(StackTemp.substring(0,StackTemp.indexOf("L")) + "."+
+		  	      		tempString.substring(0,tempString.indexOf("."))+"("+variables+")");
+			  }
+			  else if (tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("(")).equals("<init>"))
+			  {
+			      if (!oStack.empty())
+			      {
+			        String tempOstack = oStack.pop().toString();
+    			        while (tempString.indexOf("/")!=-1 && (tempString.indexOf("/") < tempString.indexOf("(")))
+			            tempString = tempString.substring(tempString.indexOf("/")+1);
+//System.out.println("Beep: " + tempString);
+			        if (tempOstack.startsWith("new " + tempString.substring(0,tempString.indexOf("."))))
+		  	    	{
+		  	    	    oStack.push("new " + tempString.substring(0,tempString.indexOf(".")) + "("+variables+")");
+		  	    	}
+		  	    	else
+		  	    	    oStack.push(tempString + "("+variables+")");
+		  	    	    
+		  	      }
+			      else if (outstandingType != "" && typeCheck.indexOf(outstandingType)!=-1 && !oStack.empty())
+		  	    	oStack.push(oStack.pop() + "("+variables+")");
+			      else 
+			      {
+				oStack.push(tempString.substring(0,tempString.indexOf("."))+"("+variables+")");
+				//if (!oStack.empty())
+					//System.out.println(oStack.pop());
+			      }	
+			  }
+			  else if (tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("(")).equals("toString") 
+			           && oStack.peek().toString().startsWith("new StringBuffer().append("))
+			  {
+			      tempString = oStack.pop().toString();
+			      tempString = tempString.substring(25); //gets rid of "new Stringbuffer().append";
+			      while (tempString.indexOf(").append(") != -1)
+				      tempString = tempString.replaceAll(".append"," + ");
+		  	      oStack.push(tempString);
+			  }
+
+			  else if (outstandingType != "" && typeCheck.indexOf(outstandingType)!=-1 && !oStack.empty())
+			  {			    	
+			    String temp2 = oStack.pop().toString();
+			    if (temp2.indexOf("Ljava")!=-1)
+			    	temp2 = temp2.substring(0,temp2.indexOf("Ljava"));
+			    while (temp2.indexOf("/")!=-1)
+			        temp2 = temp2.substring(temp2.indexOf("/")+1); 
+			    if (tempString.endsWith("V"))
+			    	finalStack.push(space + temp2 + "." + tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("("))+"("+variables+"); //"+l);
+			    else
+			    	oStack.push(temp2 + "." + tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("("))+"("+variables+")");
+			  }
+			  else if (tempString.endsWith("V"))
+			  {
+    			    if (tempString.indexOf("Ljava")!=-1)
+    			    	tempString = tempString.substring(0,tempString.indexOf("Ljava"));
+    			    while (tempString.indexOf("/")!=-1)
+			        tempString = tempString.substring(tempString.indexOf("/")+1);
+    			    if (tempString.substring(0,tempString.indexOf(".")).equals(ClassName))
+			    {
+				finalStack.push(space + tempString.substring(0,tempString.indexOf("("))+"("+variables+")); //"+l);
+			    	type=tempString.substring(0,tempString.indexOf("."));
+			    }
+    			    else
+			    	finalStack.push(space + tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("("))+"("+variables+"); //"+l);
+			  }
+			  else
+			  {
+    			    if (tempString.indexOf("Ljava")!=-1)
+    			    	tempString = tempString.substring(0,tempString.indexOf("Ljava"));
+    			    while (tempString.indexOf("/")!=-1)
+			        tempString = tempString.substring(tempString.indexOf("/")+1);
+			    type=tempString.substring(0,tempString.indexOf("."));
+    			    if (!oStack.empty())
+    			    {
+    			    	String temp2 = oStack.pop().toString();
+//System.out.println(temp2);
+    			    	if (temp2.startsWith("local")
+    			        	&& temp2.length() < 8
+    			        	&& type.equals(VarTypes.get(Integer.parseInt(temp2.substring(5))).toString()))
+    			    	   oStack.push(temp2 + tempString.substring(tempString.indexOf("."),tempString.indexOf("("))+"("+variables+")");
+    			    	else
+    			    	{
+    			    	   oStack.push(temp2);
+				   oStack.push(tempString.substring(0,tempString.indexOf("("))+"("+variables+")");
+    			    	}
+			    }
+    			    else if (!tempString.substring(0,tempString.indexOf(".")).equals(ClassName))
+				oStack.push(tempString.substring(0,tempString.indexOf("("))+"("+variables+")");
+			    else
+			  	oStack.push(tempString.substring(tempString.indexOf(".")+1,tempString.indexOf("("))+"("+variables+")"); 
+
+			  }
+        		:}
+                ;
+            
+object   ::= number:l NEW:s number:n
+		{: 
+                        lineNum=Integer.parseInt(l.toString());
+			String tempString = resolveConstant (Integer.parseInt(n.toString()));
+//System.out.println(tempString);
+			outstandingType=tempString;
+			while (tempString.indexOf("/")!=-1)
+				tempString = tempString.substring(tempString.indexOf("/")+1);
+                        type = tempString;
+			oStack.push("new "+tempString);
+		:}
+	     | number:l PUTFIELD:s number:n
+	       {:
+	       
+                lineNum=Integer.parseInt(l.toString());
+		String tempString = oStack.pop().toString();
+		if (MethodName.equals("<init>"))
+		{	
+			Stack tempStack = new Stack();
+			String tempFieldName = resolveConstant(Integer.parseInt(n.toString()));
+			if (tempFieldName.endsWith("["))
+				   tempFieldName = tempFieldName.substring(0,tempFieldName.length()-1);
+			String newBetterType = "", temp1="";
+			if (tempFieldName.indexOf("Ljava")!=-1)
+			{
+				newBetterType = tempFieldName.substring(tempFieldName.indexOf("Ljava"),tempFieldName.length());
+				tempFieldName = tempFieldName.substring(0,tempFieldName.indexOf("Ljava"));
+				if (tempFieldName.endsWith("["))
+				   tempFieldName = tempFieldName.substring(0,tempFieldName.length()-1);
+				
+//System.out.println("Type is " + newBetterType);
+				while (newBetterType.indexOf("/")!=-1)
+					newBetterType = newBetterType.substring(newBetterType.indexOf("/")+1);
+				System.out.println("Type is " + newBetterType);
+				
+			}
+			while (!fieldStack.empty() && !fieldStack.peek().toString().endsWith(" " + tempFieldName + ";"))
+			{
+//System.out.println(fieldStack.peek() + " = " + tempFieldName + "?");
+				tempStack.push(fieldStack.pop());
+			}
+			
+			if (!fieldStack.empty())
+			{
+			   temp1 = fieldStack.pop().toString();
+			   fieldStack.push(space + temp1.substring(0,temp1.length()-1) + " = " + tempString + ";");
+			}
+			else
+			   fieldStack.push(space + "  unknown = " + tempString + ";");
+//System.out.println("This is" + temp1);
+				
+			
+			while (!tempStack.empty())
+				fieldStack.push(tempStack.pop());
+		}
+		else
+		{
+			if (tempString.startsWith("new") && tempString.indexOf("[")+tempString.indexOf("]")>6)
+			  {
+			    int numOfElements = Integer.parseInt(tempString.substring(tempString.indexOf("[")+1, tempString.indexOf("]")));
+			    tempString = "}";
+			    for (int i = 0; i<numOfElements; i++)
+			     {
+				   String temp1 = finalStack.pop().toString();
+				   tempString = temp1.substring(temp1.indexOf("]=")+2,temp1.indexOf(";"))  + tempString;
+				   if ((numOfElements - i)>1)
+				       tempString=", " + tempString;
+			     }
+			    tempString ="{" + tempString;
+			  }
+
+			finalStack.push(space + resolveConstant(Integer.parseInt(n.toString()))+" = "+tempString+"; //" + l.toString());
+		}
+	      :}
+	| number:l PUTSTATIC:s number:n
+	       {:
+                lineNum=Integer.parseInt(l.toString());
+		String tempString = oStack.pop().toString();		
+		if (MethodName.equals("<clinit>"))
+		{	
+			Stack tempStack = new Stack();
+			String tempFieldName = resolveConstant(Integer.parseInt(n.toString()));
+			String newBetterType = "";
+			if (tempFieldName.indexOf("Ljava")!=-1)
+			{
+				newBetterType = tempFieldName.substring(tempFieldName.indexOf("Ljava"),tempFieldName.length());
+				tempFieldName = tempFieldName.substring(0,tempFieldName.indexOf("Ljava"));
+				
+//	System.out.println("Type is " + newBetterType);
+				while (newBetterType.indexOf("/")!=-1)
+					newBetterType = newBetterType.substring(newBetterType.indexOf("/")+1);
+//	System.out.println("Type is " + newBetterType);
+				
+			}
+			while (!fieldStack.peek().toString().endsWith(" " + tempFieldName + ";") && !fieldStack.empty())
+			{
+//System.out.println(fieldStack.peek() + " = " + tempFieldName + "?");
+				tempStack.push(fieldStack.pop());
+			}
+			String temp1 = fieldStack.pop().toString();
+			
+//System.out.println("This is" + temp1);
+			
+			fieldStack.push(space + temp1.substring(0,temp1.length()-1) + " = " + tempString + ";");	
+			
+			while (!tempStack.empty())
+				fieldStack.push(tempStack.pop());
+		}
+		else
+		{
+		
+			if (tempString.startsWith("new") && tempString.indexOf("[")+tempString.indexOf("]")>6)
+			  {
+			    int numOfElements = Integer.parseInt(tempString.substring(tempString.indexOf("[")+1, tempString.indexOf("]")));
+			    tempString = "}";
+			    for (int i = 0; i<numOfElements; i++)
+			       {
+			       	   String temp1 = finalStack.pop().toString();
+			           tempString = temp1.substring(temp1.indexOf("]=")+2,temp1.indexOf(";"))  + tempString;
+			           if ((numOfElements - i)>1)
+			               tempString=", " + tempString;
+			       }
+			    tempString ="{" + tempString;
+			 }
+			 finalStack.push(space + resolveConstant(Integer.parseInt(n.toString()))+" = "+tempString+"; //" + l.toString());
+		}
+	      :}
+	     | number:l GETSTATIC:s number:n
+		{:		
+			lineNum=Integer.parseInt(l.toString());
+		        String tempString = resolveConstant(Integer.parseInt(n.toString()));
+			oStack.push(tempString);	
+                :}
+	     | number:l GETFIELD:s number:n
+		{:
+			lineNum=Integer.parseInt(l.toString());
+		        String tempString = resolveConstant(Integer.parseInt(n.toString()));
+			oStack.push(tempString);	
+			/*String tempString = oStack.pop().toString();
+			System.out.println(tempString);
+			if (!oStack.empty())
+				if (temp.toString().equals(oStack.peek().toString()))
+					oStack.pop();
+			oStack.push(resolveConstant(Integer.parseInt(n.toString())));*/
+		:}
+	;
+                
+ipush	::= number:l IPUSH:p number:n
+                          {: 
+			    lineNum=Integer.parseInt(l.toString());
+                            oStack.push(n);
+                           :}
+		;
+
+const	::= number:l type:t CONST:c number:n
+                        {: 
+				lineNum=Integer.parseInt(l.toString());
+				if (type == "double" || type == "float")
+					oStack.push(n+".0");
+				else
+					oStack.push(n);
+                        :}
+		|	number:l type:t CONST:c M1:m
+			{: /* iconst_m1 */ 
+			    lineNum=Integer.parseInt(l.toString());
+                            if (type == "double" || type == "float")
+								oStack.push("-1.0");
+                            else
+								oStack.push("-1");
+                        :}
+		|	number:l type:t CONST:c NULL:n
+			{: /* aconst_null */ 
+			    lineNum=Integer.parseInt(l.toString());
+                            oStack.push(n);
+                        :}
+		;
+		
+conv    ::= number:l T2T:i type:t
+                        {: 
+			       lineNum=Integer.parseInt(l.toString());
+                               String tempString = oStack.pop().toString();
+                               int index=0;
+                               if (tempString.startsWith("local"))
+                                {
+				     try {
+				          if (tempString.indexOf(" ")!=-1)
+					  	index = Integer.parseInt(tempString.substring(5,tempString.indexOf(" ")));
+					  else
+					  	index = Integer.parseInt(tempString.substring(5));
+				     } catch (NumberFormatException e) {
+                               		  oStack.push("(" + type + ") " + tempString);
+				     }
+	   			     if (VarTypes.get(index).toString().equals(type))
+	   			          oStack.push(tempString);
+	   			     else 
+                               		  oStack.push("(" + type + ") " + tempString);
+				}
+			       else
+                                  oStack.push("(" + type + ") " + tempString);                           
+                        :}
+                ;
+                
+stackops ::= number:l DUP
+		{: 
+//System.out.println(oStack.peek().toString());
+		   lineNum=Integer.parseInt(l.toString());
+		   if (!oStack.peek().toString().startsWith("new") 
+		       || (oStack.peek().toString().indexOf("(") != -1
+		       || oStack.peek().toString().indexOf("[") != -1))
+		   	oStack.push(oStack.peek());
+		 :}
+	    | number:l DUPX:r
+	        {: 
+		   lineNum=Integer.parseInt(l.toString());
+	           String topString=oStack.pop().toString(),nextString=oStack.pop().toString(); 
+	           if (r.toString().endsWith("_x1") || r.toString().endsWith("2_x2"))
+		    {
+			   oStack.push(topString); 
+			   oStack.push(nextString); 
+			   oStack.push(topString); 
+	            }
+	           else if (r.toString().endsWith("_x2"))
+		    {
+	          	   String thirdString=oStack.pop().toString();
+			   oStack.push(topString); 
+			   oStack.push(thirdString); 
+			   oStack.push(nextString); 
+			   oStack.push(topString); 
+	            }
+	         :}
+	    | number:l POP {: 
+			lineNum=Integer.parseInt(l.toString());
+			oStack.pop(); 
+			:}
+	    | number:l POP2 
+	        {: 
+		   lineNum=Integer.parseInt(l.toString());
+	           oStack.pop(); 
+	           oStack.pop(); 
+	         :}
+	    | number:l SWAP 
+	        {: 
+		   lineNum=Integer.parseInt(l.toString());
+	           String topString=oStack.pop().toString(),nextString=oStack.pop().toString(); 
+	           oStack.push(topString); 
+	           oStack.push(nextString); 
+	         :}
+		;
+                         
+arithops   ::= number:l type:t NEG:r
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           if (oStack.peek().toString().indexOf("+") == -1 && oStack.peek().toString().indexOf("-") == -1 &&
+			       oStack.peek().toString().indexOf("*") == -1 && oStack.peek().toString().indexOf("/") == -1)
+                           	oStack.push("-("+oStack.pop().toString()+")");
+                           else if (!oStack.peek().toString().trim().startsWith("-"))
+                           	oStack.push("-"+oStack.pop().toString());
+                           else
+                           	oStack.push(oStack.pop().toString().trim().substring(1));
+                        :}
+                        
+	    | number:l type:t REM:r
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           temp = oStack.pop();
+                           oStack.push(oStack.pop().toString() + " % " + temp.toString()); 
+                        :}
+            | number:l type:t ADD:m
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           temp = oStack.pop();
+                           oStack.push(oStack.pop().toString() + " + " + temp.toString()); 
+                        :}
+            | number:l type:t SUB:m
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           temp = oStack.pop();
+                           oStack.push(oStack.pop().toString() + " - " + temp.toString()); 
+                        :}
+            | number:l type:t MUL:m
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           temp = oStack.pop();
+                           if (temp.toString().indexOf("+") == -1 && temp.toString().indexOf("-") == -1 && 
+                               temp.toString().indexOf("*") == -1 && temp.toString().indexOf("/") == -1 &&
+                               oStack.peek().toString().indexOf("+") == -1 && oStack.peek().toString().indexOf("-") == -1 &&
+                               oStack.peek().toString().indexOf("*") == -1 && oStack.peek().toString().indexOf("/") == -1)
+                           	oStack.push(oStack.pop().toString() + " * " + temp.toString()); 
+                           else if (temp.toString().indexOf("+") == -1 && temp.toString().indexOf("-") == -1 &&
+                           	    temp.toString().indexOf("*") == -1 && temp.toString().indexOf("/") == -1)
+                           	oStack.push("(" + oStack.pop().toString() + ") * " + temp.toString()); 
+                           else if (oStack.peek().toString().indexOf("+") == -1 && 
+                                    oStack.peek().toString().indexOf("-") == -1 &&
+                                    oStack.peek().toString().indexOf("*") == -1 &&
+                                    oStack.peek().toString().indexOf("/") == -1 )
+                           	oStack.push(oStack.pop().toString() + " * (" + temp.toString()+")"); 
+                           else 
+                           	oStack.push("(" + oStack.pop().toString() + ")*(" + temp.toString()+")"); 
+                        :}
+            | number:l type:t DIV:m
+                        {: 
+			   lineNum=Integer.parseInt(l.toString());
+                           temp = oStack.pop();
+                           if (temp.toString().indexOf("+") == -1 && temp.toString().indexOf("-") == -1 && 
+                               temp.toString().indexOf("*") == -1 && temp.toString().indexOf("/") == -1 &&
+                               oStack.peek().toString().indexOf("+") == -1 && oStack.peek().toString().indexOf("-") == -1 &&
+                               oStack.peek().toString().indexOf("*") == -1 && oStack.peek().toString().indexOf("/") == -1)
+                           	oStack.push(oStack.pop().toString() + " / " + temp.toString()); 
+                           else if (temp.toString().indexOf("+") == -1 && temp.toString().indexOf("-") == -1 &&
+                           	    temp.toString().indexOf("*") == -1 && temp.toString().indexOf("/") == -1)
+                           	oStack.push("(" + oStack.pop().toString() + ") / " + temp.toString()); 
+                           else if (oStack.peek().toString().indexOf("+") == -1 && 
+                                    oStack.peek().toString().indexOf("-") == -1 &&
+                                    oStack.peek().toString().indexOf("*") == -1 &&
+                                    oStack.peek().toString().indexOf("/") == -1 )
+                           	oStack.push(oStack.pop().toString() + " / (" + temp.toString()+")");
+                           else 
+                           	oStack.push("(" + oStack.pop().toString() + ")/(" + temp.toString()+")"); 
+                        :}
+		;
+
+bitops	::= number:l type:t SHL:r
+          	                {: 
+			   	   lineNum=Integer.parseInt(l.toString());
+				   String tempString = oStack.pop().toString();
+				   oStack.push("(" + oStack.pop() + ") << (" + tempString + ")"); 
+	    	                :}
+                    | number:l type:t SHR:r
+                        	{: 
+			   	   lineNum=Integer.parseInt(l.toString());
+				   String tempString = oStack.pop().toString();
+				   if (r.toString().startsWith("u"))
+				   	oStack.push("(" + oStack.pop() + ") >>> (" + tempString + ")"); 
+				   else
+				   	oStack.push("(" + oStack.pop() + ") >> (" + tempString + ")"); 
+                        	:}  
+		    | number:l type:t AND:r
+				{: 
+			   	   lineNum=Integer.parseInt(l.toString());
+				   String tempString = oStack.pop().toString();
+				   oStack.push("(" + oStack.pop() + ") & (" + tempString + ")"); 
+				:}	
+		    | number:l type:t OR:r
+				{: 
+			   	   lineNum=Integer.parseInt(l.toString());
+				   String tempString = oStack.pop().toString();
+				   oStack.push("(" + oStack.pop() + ") | (" + tempString + ")"); 
+				:}	
+		    | number:l type:t XOR:r
+				{: 
+			   	   lineNum=Integer.parseInt(l.toString());
+				   String tempString = oStack.pop().toString();
+				   oStack.push("(" + oStack.pop() + ") ^ (" + tempString + ")"); 
+				:}	
+		;
+                          
+iinc	::= number:l IINC:p number:n1 number:n2
+                          {: 
+			      lineNum=Integer.parseInt(l.toString());
+                              //System.out.println(space + "local" + n1 + "+="+n2+";");
+                              if (!n2.toString().equals("1"))
+                                finalStack.push(space + "local" + n1 + "+="+n2+"; //" + l);
+                              else if (!oStack.empty() && oStack.peek().toString().equals("local"+n1.toString()))
+                              {
+                              	oStack.pop();
+                              	oStack.push("local"+n1+"++");
+                              }
+                              else
+                                finalStack.push(space + "local" + n1 + "++; //" + l);
+                          :}
+            | number:l IINC:p number:n1 NEGATIVE number:n2
+                          {: 
+			      lineNum=Integer.parseInt(l.toString());
+                              //System.out.println(space + "local" + n1 + "-="+n2+"; //" + l);
+                              if (!n2.toString().equals("1"))
+                                finalStack.push(space + "local" + n1 + "-="+n2+"; //" + l);
+                              else if (!oStack.empty() && oStack.peek().toString().equals("local"+n1.toString()))
+                              {
+                              	oStack.pop();
+                              	oStack.push("local"+n1+"--");
+                              }
+                              else
+                                finalStack.push(space + "local" + n1 + "--; //" + l);
+                          :}
+		;	
+
+
+cmp	::= number:l type:t CMP:c
+		{:
+		      lineNum=Integer.parseInt(l.toString());
+                      temp = oStack.pop();
+                      //System.out.println(c.toString());
+                      if (c.toString().trim().equals("cmpg"))
+                         oStack.push(space + oStack.pop().toString() + ">" + temp.toString());
+                      else if (c.toString().trim().equals("cmpl"))
+                         oStack.push(space + oStack.pop().toString() + "<" + temp.toString());
+                      else
+                      	 oStack.push(space + oStack.pop().toString() + "<>" + temp.toString());
+		 :}
+			  ;
+
+if_icmp    ::= number:l IF_ICMP:c number:n 
+                    {:
+			lineNum=Integer.parseInt(l.toString());
+			int branchline = Integer.parseInt(n.toString());
+			int currentline = Integer.parseInt(l.toString());
+			//System.out.println(n.toString() + " < "+ l.toString() + "?");
+			Stack tempStack=new Stack();
+			int linenum;
+			                              
+			if (branchline<currentline)
+			  {
+			   if (branchline < lowest_num)
+			    {     
+                              lowest_num=branchline;
+	                            	                              
+                              if (!finalStack.empty())
+                               {
+                                linenum=finalStack.peek().toString().indexOf("//");
+                                if (linenum != -1) 
+                                    currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                while (branchline<=currentline)
+                                 {
+	                                 tempStack.push(finalStack.pop());
+	                                 linenum=finalStack.peek().toString().indexOf("//");
+                              		 if (linenum != -1) 
+                                             currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                 }
+                    	       }
+		                              
+                              finalStack.push("do {");
+			                    
+			      
+	                      while (!tempStack.empty())
+	                        finalStack.push("   " + tempStack.pop());
+                              temp = oStack.pop();
+                              if (c.equals("if_icmpge"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + ">=" + temp.toString() +");" + " //" + l);
+                              else if (c.equals("if_icmple"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + "<=" + temp.toString() +");" + " //" + l);
+                              else if (c.equals("if_icmpgt"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + ">" + temp.toString() +");" + " //" + l);
+                              else if (c.equals("if_icmplt"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + "<" + temp.toString() +");" + " //" + l);
+                              else if (c.equals("if_icmpeq"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + "==" + temp.toString() +");" + " //" + l);
+                              else if (c.equals("if_icmpne"))
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + "!=" + temp.toString() +");" + " //" + l);
+                              else
+                                 finalStack.push(space + "} while (" + oStack.pop().toString() + "!!" + temp.toString() +");" + " //" + l);
+			    }
+		          }
+		        else
+		         {
+			    ifStack.push(n);
+                            temp = oStack.pop();
+                            if (c.equals("if_icmpge"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + "<" + temp.toString() +")" + " //" + l);
+                            else if (c.equals("if_icmple"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + ">" + temp.toString() +")" + " //" + l);
+                            else if (c.equals("if_icmpgt"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + "<=" + temp.toString() +")" + " //" + l);
+                            else if (c.equals("if_icmplt"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + ">=" + temp.toString() +")" + " //" + l);
+                            else if (c.equals("if_icmpeq"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + "!=" + temp.toString() +")" + " //" + l);
+                            else if (c.equals("if_icmpne"))
+                               finalStack.push(space + "if (" + oStack.pop().toString() + "==" + temp.toString() +")" + " //" + l);
+                            else
+                               finalStack.push(space + "if (" + oStack.pop().toString() + "!!" + temp.toString() +")" + " //" + l);
+
+                            finalStack.push(space + "  {");
+                            level++;
+                            space = space + "   ";
+                         }
+                      :}
+                ;
+                
+if      ::= number:l IF:c number:n 
+               {:  
+		   lineNum=Integer.parseInt(l.toString());
+               	   int branchline = Integer.parseInt(n.toString());
+               	   int currentline = Integer.parseInt(l.toString());
+               	   //System.out.println(n.toString() + " < "+ l.toString() + "?");
+               	   Stack tempStack=new Stack();
+               	   int linenum;
+               	   String condString;
+		   int trimpoint=-1;
+		   if (oStack.peek().toString().indexOf("<") != -1)
+		    	trimpoint = oStack.peek().toString().indexOf("<");
+		   if (oStack.peek().toString().indexOf(">") != -1)
+		    	trimpoint = oStack.peek().toString().indexOf(">");
+		    
+               	   if (branchline<currentline)
+               	     {
+			if (trimpoint != -1)
+			{
+				String operand1 = oStack.peek().toString().substring(0,trimpoint);
+				String operand2 = oStack.pop().toString().substring(trimpoint + 1);
+				if (c.equals("ifge"))
+					condString = (operand1 + " >= " + operand2);
+				else if (c.equals("ifle") )
+					condString = (operand1 + " <= " + operand2);
+				else if (c.equals("ifgt"))
+					condString = (operand1 + " > " + operand2);
+				else if (c.equals("iflt"))
+					condString = (operand1 + " < " + operand2);
+				else if (c.equals("ifeq"))
+					condString = (operand1 + " == " + operand2);
+				else if (c.equals("ifne"))
+					condString = (operand1 + " != " + operand2);
+				else
+					condString = (operand1 + " !! " + operand2);
+	                }
+	                else
+	                {
+				String operand1 = oStack.pop().toString();
+				int index;
+				try {
+				  index = Integer.parseInt(operand1.substring(5));	
+				} catch (NumberFormatException e) {  //failure
+				  index=0;
+				}
+				if (operand1.startsWith("local") && VarTypes.get(index).toString().equals("boolean"))
+				{
+					if (c.equals("ifge"))
+						condString = (operand1 + " < 0" );
+					else if (c.equals("ifle"))
+						condString = (operand1 + " > 0" );
+					else if (c.equals("ifgt"))
+						condString = (operand1 + " <= 0" );
+					else if (c.equals("iflt"))
+						condString = (operand1 + " >= 0" );
+					else if (c.equals("ifnull"))
+						condString = (operand1 + " != null" );
+					else if (c.equals("ifnonnull"))
+						condString = (operand1 + " == null" );
+					else if (c.equals("ifeq"))
+						condString = (operand1);
+					else if (c.equals("ifne"))
+						condString = ("!" + operand1);
+					else
+						condString = (operand1 + " == 0)");
+				}
+				else
+				{
+					if (c.equals("ifge"))
+						condString = (operand1 + " < 0" );
+					else if (c.equals("ifle"))
+						condString = (operand1 + " > 0" );
+					else if (c.equals("ifgt"))
+						condString = (operand1 + " <= 0" );
+					else if (c.equals("iflt"))
+						condString = (operand1 + " >= 0" );
+					else if (c.equals("ifnull"))
+						condString = (operand1 + " != null" );
+					else if (c.equals("ifnonnull"))
+						condString = (operand1 + " == null" );
+					else if (c.equals("ifeq"))
+						condString = (operand1 + " != 0");
+					else if (c.equals("ifne"))
+						condString = (operand1 + " == 0");
+					else
+						condString = (operand1 + " == 0)");
+				}
+		    	}
+               	     	
+               	   	if (branchline < lowest_num)
+			    {     
+                              lowest_num=branchline;
+	                            	                              
+                              if (!finalStack.empty())
+                               {
+                                linenum=finalStack.peek().toString().indexOf("//");
+                                if (linenum != -1) 
+                                    currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                while (branchline<=currentline)
+                                 {
+	                                 tempStack.push(finalStack.pop());
+	                                 linenum=finalStack.peek().toString().indexOf("//");
+                              		 if (linenum != -1) 
+                                             currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                 }
+                    	       }
+		                              
+                              finalStack.push("do {");
+			                    
+			      
+	                      while (!tempStack.empty())
+	                        finalStack.push("   " + tempStack.pop());
+
+                              finalStack.push(space + "} while (" + condString +");" + " //" + l);
+			    }
+		      }
+		   else
+		    {
+		     if (trimpoint != -1)
+		       {
+			String operand1 = oStack.peek().toString().substring(0,trimpoint);
+			String operand2 = oStack.pop().toString().substring(trimpoint + 1);
+			if (c.equals("ifge"))
+				condString = (operand1 + " < " + operand2);
+			else if (c.equals("ifle") )
+				condString = (operand1 + " > " + operand2);
+			else if (c.equals("ifgt"))
+				condString = (operand1 + " <= " + operand2);
+			else if (c.equals("iflt"))
+				condString = (operand1 + " >= " + operand2);
+			else if (c.equals("ifeq"))
+				condString = (operand1 + " == " + operand2);
+			else if (c.equals("ifne"))
+				condString = (operand1 + " != " + operand2);
+			else
+				condString = (operand1 + " !! " + operand2);
+                     }
+                    else
+                     {
+
+			String operand1 = oStack.pop().toString();
+			int index;
+			try {
+			  index = Integer.parseInt(operand1.substring(5));	
+			} catch (NumberFormatException e) {  //failure
+			  index=0;
+			}
+			if (operand1.startsWith("local") && VarTypes.get(index).toString().equals("boolean"))
+			{
+				if (c.equals("ifge"))
+					condString = (operand1 + " < 0" );
+				else if (c.equals("ifle"))
+					condString = (operand1 + " > 0" );
+				else if (c.equals("ifgt"))
+					condString = (operand1 + " <= 0" );
+				else if (c.equals("iflt"))
+					condString = (operand1 + " >= 0" );
+				else if (c.equals("ifnull"))
+					condString = (operand1 + " != null" );
+				else if (c.equals("ifnonnull"))
+					condString = (operand1 + " == null" );
+				else if (c.equals("ifeq"))
+					condString = (operand1);
+				else if (c.equals("ifne"))
+					condString = ("!" + operand1);
+				else
+					condString = (operand1 + " == 0)");
+			}
+			else
+			{
+				if (c.equals("ifge"))
+					condString = (operand1 + " < 0" );
+				else if (c.equals("ifle"))
+					condString = (operand1 + " > 0" );
+				else if (c.equals("ifgt"))
+					condString = (operand1 + " <= 0" );
+				else if (c.equals("iflt"))
+					condString = (operand1 + " >= 0" );
+				else if (c.equals("ifnull"))
+					condString = (operand1 + " != null" );
+				else if (c.equals("ifnonnull"))
+					condString = (operand1 + " == null" );
+				else if (c.equals("ifeq"))
+					condString = (operand1 + " != 0");
+				else if (c.equals("ifne"))
+					condString = (operand1 + " == 0");
+				else
+					condString = (operand1 + " == 0)");
+			}
+	     }	    
+	    
+	             finalStack.push(space + "if (" + condString.trim() + ")" + " //" + l);
+	             finalStack.push(space + "  {");
+	             level++;
+	             space = space + "   ";
+
+	             ifStack.push(n);
+	             lastLine = Integer.parseInt(l.toString());
+                    }
+                :}
+                ;
+                
+goto    ::= number:l GOTO:c number:n 
+                     {: 
+			lineNum=Integer.parseInt(l.toString());
+			int branchline = Integer.parseInt(n.toString());
+			int currentline = Integer.parseInt(l.toString());
+			int lastint=0;
+			temp = "";
+			
+			//finalStackDebug("goto");
+			Stack tempStack=new Stack();
+			int linenum, condStringLineNum=0, tempCounter=0;
+			String condString="0", tempString="0";
+                              
+			if (branchline<currentline)
+			  {                            
+                              if (finalStack.peek().toString().trim().indexOf("=")!=-1 
+                                  || finalStack.peek().toString().trim().indexOf("++")!=-1
+                                  || finalStack.peek().toString().trim().indexOf("--")!=-1)
+                                 {
+                                  forOrWhile = true; //can be rendered as a for loop
+                                  linenum=finalStack.peek().toString().indexOf("; //");
+                                  tempString=finalStack.peek().toString().substring(linenum+2).trim();
+                                  temp = finalStack.pop().toString();
+                                 }
+                              else
+                                 {
+                                  forOrWhile = false;
+                                  tempString="//"+l.toString().trim();
+                                 }
+                              
+                              if (branchline!=0 && !finalStack.empty())
+                              {
+                               linenum=finalStack.peek().toString().indexOf("//");
+                               if (linenum != -1) 
+                                 currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                  
+                               while (branchline<currentline)
+                                {
+                                 tempStack.push(finalStack.pop());
+                                 linenum=finalStack.peek().toString().indexOf("//");
+                                 lastint = currentline;
+                                 if (linenum != -1) 
+                                    currentline = Integer.parseInt(finalStack.peek().toString().substring(linenum+2));
+                                 //else
+                                 //   finalStack.push(tempStack.pop());
+                                 //System.out.println("Branch to: " + branchline + "; current position: " + currentline + "; last int: " + lastint);  
+                                }
+                               
+                               
+                               linenum=tempStack.peek().toString().indexOf("if");
+                               
+                               while (linenum == -1)
+				{
+                               	  finalStack.push(tempStack.pop());
+                               	  linenum=tempStack.peek().toString().indexOf("if");
+				}                               	  
+                               //System.out.println(tempStack.peek().toString().trim().substring(4, tempStack.peek().toString().trim().indexOf(") //")));
+                               condStringLineNum = tempStack.peek().toString().trim().indexOf(") //");
+                               condString=tempStack.pop().toString().trim().substring(4, condStringLineNum);
+                              }
+                              else
+                              {
+                               condString = "true";
+                              }
+                              
+		      		level--;
+		      		if (space.length()>3)
+			        	space = space.substring(3);
+				else
+					space = "";
+	
+				int tempcounter = 0;
+				
+                                if (forOrWhile)
+                                  {                                    
+                                    linenum=finalStack.peek().toString().indexOf("//");
+                                    
+                                    while (linenum == -1)
+                                    {
+                                       tempcounter++;
+                                       tempStack.push(finalStack.pop());
+                                       linenum=finalStack.peek().toString().indexOf("//");
+                                    }
+                                    
+                                    //System.out.println(finalStack.peek().toString());
+                                    //System.out.println("Equals? " + (finalStack.peek().toString().indexOf("=")!=-1) +
+                                    //     "; startsWith local? " + (finalStack.peek().toString().startsWith("local")) +
+                                    //     "; indexOf? " + (finalStack.peek().toString().indexOf(" local") != -1));
+
+                                    if (finalStack.peek().toString().indexOf("=")!=-1 && 
+                                        (finalStack.peek().toString().startsWith("local") ||
+                                         finalStack.peek().toString().indexOf(" local") != -1))
+                                     {
+                                       tempStack.push(finalStack.peek().toString().substring(0, linenum));
+                                       while (tempcounter > 0)
+				         {
+				            finalStack.push(tempStack.pop());
+				            tempcounter--;
+                                         }
+                                       String initString = tempStack.pop().toString().trim();
+                                       if (!initString.startsWith("local") && initString.indexOf("local")!=-1) 
+                                       //if the index variable is initialized in the for loop, delete it
+                                         {
+                                      	    int localNumIndex = initString.indexOf("local");
+                                      	    int localEndIndex = initString.indexOf("=");
+                                      	    int localNum = Integer.parseInt(initString.substring(localNumIndex+5,localEndIndex));
+                                      	    VarTypes.remove(localNum);
+                                      	    varsInUse.clear(localNum);
+                                      	 }
+                                       finalStack.push(space + "for (" + initString + " " + condString.trim() + "; " + temp.toString().substring(0, temp.toString().indexOf(";")).trim() + ") " + finalStack.pop().toString().substring(linenum));
+                                       temp = "";
+                                     }
+                                    else
+                                     {
+					while (tempcounter > 0)
+					 {
+					    finalStack.push(tempStack.pop());
+					    tempcounter--;
+	                                 }
+                             	       finalStack.push(space + "while (" + condString.trim() + ") //" + condStringLineNum);
+                             	     }
+                                       
+                                  } 
+                       		else
+                                   finalStack.push(space + "while (" + condString + ") //" + condStringLineNum);
+                              
+                       		while (!tempStack.empty())
+                       		   finalStack.push(tempStack.pop());
+                       		if (!temp.equals(""))
+                       		   finalStack.push(temp);
+                           	finalStack.push(space + "  } ");// + tempString);
+                           	if (!ifStack.empty())
+                           	   ifStack.pop();
+				skipFinish = true;                              
+			     }
+			   else
+			   {
+			     if (!switchStack.empty() && Integer.parseInt(n.toString())>((Switch)switchStack.peek()).defaultBranch)
+			     {
+			     	 Switch tempSwitch=(Switch)switchStack.pop();
+			     	 if (Integer.parseInt(n.toString())>tempSwitch.endBranch)
+			     	 	tempSwitch.endBranch = Integer.parseInt(n.toString());
+			     	 finalStack.push(space+"break; //" +l);
+			     	 switchStack.push(tempSwitch);
+			     }
+			     else
+			         gotoStack.push(n);
+			   }
+                        :}
+                ;             
+                
+tableswitch  ::= number:l TABLESWITCH 
+		{:
+			lineNum=Integer.parseInt(l.toString());
+			switchStack.push(new Switch());
+		:}
+		number:n1 number:n2 switchpairs DEFAULT number:defaultbranch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.defaultBranch=Integer.parseInt(defaultbranch.toString());
+			finalStack.push (space + "switch (" + oStack.pop() + ") //" + l.toString());
+			finalStack.push (space + " {");
+			space = space + "   ";
+			tempSwitch.origspace = space;
+			level++;
+			switchStack.push(tempSwitch);
+		 :}
+		;
+
+lookupswitch ::= number:l LOOKUPSWITCH 
+		{:
+			lineNum=Integer.parseInt(l.toString());
+			switchStack.push(new Switch());
+		:}
+		number:n switchpairs DEFAULT number:defaultbranch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.defaultBranch=Integer.parseInt(defaultbranch.toString());
+			finalStack.push (space + "switch (" + oStack.pop() + ") //" + l.toString());
+			finalStack.push (space + " {");
+			space = space + "   ";
+			tempSwitch.origspace = space;
+			level++;
+			switchStack.push(tempSwitch);
+		 :}
+		;
+
+
+switchpairs ::= switchpairs number:casenum number:branch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.add(casenum.toString(),branch.toString());
+			switchStack.push(tempSwitch);
+		:}
+ 	    | number:casenum number:branch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.add(casenum.toString(),branch.toString());
+			switchStack.push(tempSwitch);
+		:}
+	    | switchpairs NEGATIVE number:casenum number:branch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.add("-"+casenum.toString(),branch.toString());
+			switchStack.push(tempSwitch);
+		:}
+ 	    | NEGATIVE number:casenum number:branch
+		{:
+			Switch tempSwitch = (Switch) switchStack.pop();
+			tempSwitch.add("-"+casenum.toString(),branch.toString());
+			switchStack.push(tempSwitch);
+		:}
+	    ;
+	      
+arrayops 	::= 	aload
+			| astore
+			| newarray
+			| arraylength
+			;
+			
+arraylength	::= 	number:l ARRAYLENGTH:s
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   oStack.push(oStack.pop() + ".length");
+			 :}
+		;
+
+aload		::= 	number:l ALOAD:s
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   String tempString=oStack.pop().toString();
+			   //if (tempString.startsWith("new"))
+			   oStack.push(oStack.pop() + "[" + tempString + "]");
+			 :}
+		;
+		
+astore		::= 	number:l ASTORE:s
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   String tempString=oStack.pop().toString();
+			   tempString = "[" + oStack.pop().toString() + "]="+tempString+";";
+			   finalStack.push(space + oStack.pop() + tempString);
+			 :}
+		;
+		
+newarray	::= 	number:l NEWARRAY:s number:n
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   int testType=Integer.parseInt(n.toString());
+			   String tempString;
+			   
+			   newArray = true;
+			   arrayElements = Integer.parseInt(oStack.peek().toString());
+			   
+			   switch (testType)
+			   {
+			     case 4:
+			   	tempString = "boolean";
+			   	break;
+			     case 5:
+			   	tempString = "char";
+			   	break;
+			     case 6:
+			   	tempString = "float";
+			   	break;
+			     case 7:
+			   	tempString = "double";
+			   	break;
+			     case 8:
+			   	tempString = "byte";
+			   	break;
+			     case 9:
+			   	tempString = "short";
+			   	break;
+			     case 10:
+			   	tempString = "int";
+			   	break;
+			     case 11:
+			   	tempString = "long";
+			   	break;
+			     default:
+			     	tempString = "error";
+			     	break;
+			   }
+			   type = tempString;
+			   oStack.push("new " + tempString + "[" + oStack.pop() +"]");
+			:}
+			   
+			| number:l type:t NEWARRAY:s number:n
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   type = resolveConstant(Integer.parseInt(n.toString()));
+			   while (type.indexOf("/")!=-1)
+			   	type = type.substring(type.indexOf("/")+1);
+			   oStack.push("new " + type + "[" + oStack.pop() +"]");
+			        
+			 :}
+			   
+			| number:l MULTIANEWARRAY:s number:n1 COMMA number:n2
+			{: 
+			   lineNum=Integer.parseInt(l.toString());
+			   int arrdim=Integer.parseInt(n2.toString());
+			   String dimstring="", type = resolveConstant(Integer.parseInt(n1.toString()));
+		           String tempString = type;
+			   for (int numOfParam = 0; numOfParam<tempString.length(); numOfParam++)
+				{       
+				  switch (tempString.charAt(numOfParam))
+				  {
+				   case 'Z':
+					type = "boolean";
+					break;
+				   case 'B':
+					type = "byte";
+					break;
+				   case 'C':
+					type = "char";
+					break;
+				   case 'I':
+					type = "int";
+					break;
+				   case 'S':
+					type = "short";
+					break;
+				   case 'J':
+					type = "long";
+					break;
+				   case 'F':
+					type = "float";
+					break;
+				   case 'D':
+					type = "double";
+					break;
+				   case 'L':
+					type = tempString.substring(numOfParam+1,tempString.indexOf(";"));
+					numOfParam += type.length();
+					while (type.indexOf("/") != -1)
+					    type = type.substring(type.indexOf("/")+1);
+					break;
+				   case '[':
+					break;
+				   default:
+					break;
+				  }
+				}
+
+			   while (type.indexOf("/")!=-1)
+			   	type = type.substring(type.indexOf("/")+1);
+			   for (int i=0; i<arrdim; i++)
+			   	dimstring="[" + oStack.pop() +"]"+dimstring;
+			   oStack.push("new " + type + dimstring);
+			        
+			 :}
+			 
+	| 
+		;
+             
+number 	::= 	NUMBER:n
+			{: RESULT=n; 
+			   //System.out.println(n.toString());
+			 :}
+		;
+      
+access 	::=	{: RESULT=""; :}
+		| ACCESS:a
+			{: 
+			   RESULT=a + " ";
+			   //System.out.println(a.toString());
+			 :}
+		;      
+      
+properties ::=	properties property | property
+		;
+		
+property ::=	PROPERTY:p
+			{: 
+			   if (p.toString().equals("static"))
+			   	staticAdjustment=-1;
+			   MethodProperties += p.toString() + " ";
+			   //System.out.println(p.toString());
+			 :}
+		;
+                        
+type	::= TYPE:t
+			{: 
+			   if (t.toString().equals("d"))
+					type="double";
+			   else if (t.toString().equals("f"))
+					type="float";
+			   else if (t.toString().equals("l"))
+					type="long";
+			   else if (t.toString().equals("i"))
+					type="int";
+			   else if (t.toString().equals("c"))
+					type="char";
+			   else if (t.toString().equals("s"))
+					type="short";
+			   else if (t.toString().equals("b"))
+					type="byte";
+			   else if (t.toString().equals("z"))
+					type="boolean";
+			   else if (t.toString().equals("a"));
+			   else
+					type="Object";
+			   //System.out.println(t.toString());
+			   RESULT=t;
+			 :}
+		;
+                
+            
+		
+other	::= NOP {: :}
+	| JSR
+	| RET
+	| ATHROW
+	| CHECKCAST
+	| INSTANCEOF
+	| MONITORENTER
+	| MONITOREXIT
+	| WIDE {: :}
+	;
